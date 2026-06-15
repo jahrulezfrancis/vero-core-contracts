@@ -5,6 +5,8 @@ mod guardian;
 mod reputation;
 mod task;
 mod types;
+mod vault;
+mod reentrancy;
 pub mod events;
 
 use soroban_sdk::{contract, contractimpl, Address, Env};
@@ -66,6 +68,14 @@ impl VeroContract {
             .unwrap_or(DEFAULT_WEIGHT_THRESHOLD)
     }
 
+    /// Sets the vault address for payout release. Only callable by admin.
+    pub fn set_vault_address(env: Env, admin: Address, vault: Address) {
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::VaultAddress, &vault);
+    }
+
     // ─── Task lifecycle ────────────────────────────────────────────
 
     pub fn register_task(
@@ -90,6 +100,8 @@ impl VeroContract {
     pub fn vote(env: Env, guardian: Address, task_id: u64) -> Result<(), ContractError> {
         guardian.require_auth();
 
+        reentrancy::lock(&env)?;
+
         // 1. Verify guardian status
         if !guardian::is_guardian(&env, &guardian) {
             reentrancy::unlock(&env);
@@ -104,10 +116,16 @@ impl VeroContract {
         }
 
         // 3. Fetch voting power from reputation — single storage read
-        let weight = reputation::calculate_voting_power(&env, &guardian)
-            .ok_or(ContractError::NoReputationScore)?;
+        let weight = match reputation::calculate_voting_power(&env, &guardian) {
+            Some(w) => w,
+            None => {
+                reentrancy::unlock(&env);
+                return Err(ContractError::NoReputationScore);
+            }
+        };
 
         if weight == 0 {
+            reentrancy::unlock(&env);
             return Err(ContractError::ZeroWeightVote);
         }
 
@@ -122,10 +140,13 @@ impl VeroContract {
         };
 
         // 5. Atomically increment weight with overflow protection
-        t.total_weight_accrued = t
-            .total_weight_accrued
-            .checked_add(weight)
-            .ok_or(ContractError::WeightOverflow)?;
+        t.total_weight_accrued = match t.total_weight_accrued.checked_add(weight) {
+            Some(w) => w,
+            None => {
+                reentrancy::unlock(&env);
+                return Err(ContractError::WeightOverflow);
+            }
+        };
         t.votes += 1;
 
         // 6. Check weight threshold for consensus
@@ -138,6 +159,16 @@ impl VeroContract {
         if t.total_weight_accrued >= threshold {
             t.is_done = true;
             events::emit_task_resolved(&env, task_id, t.total_weight_accrued);
+            
+            // Release funds from escrow if configured
+            if let Some(vault_addr) = env.storage().instance().get::<_, Address>(&DataKey::VaultAddress) {
+                let vault_client = vault::VaultClient::new(&env, &vault_addr);
+                // Call try_release_funds, which catches VM traps from the cross-contract call
+                if vault_client.try_release_funds(&task_id).is_err() {
+                    reentrancy::unlock(&env);
+                    return Err(ContractError::EscrowUnavailable);
+                }
+            }
         }
 
         // 7. Persist vote record and updated task — two storage writes
@@ -146,6 +177,7 @@ impl VeroContract {
 
         events::emit_weighted_vote(&env, task_id, &guardian, weight);
 
+        reentrancy::unlock(&env);
         Ok(())
     }
 

@@ -114,8 +114,7 @@ fn test_multiple_low_rep_guardians_accumulate_weight() {
     client.vote(&g2, &42u64);
     client.vote(&g3, &42u64);
 
-    client.vote(&g3, &10u64);
-    let task = client.get_task(&10u64).unwrap();
+    let task = client.get_task(&42u64).unwrap();
     assert_eq!(task.total_weight_accrued, 300);
     assert_eq!(task.votes, 3);
     assert!(task.is_done, "three low-rep guardians should resolve task");
@@ -212,10 +211,9 @@ fn test_vote_rejected_without_reputation() {
 
     client.add_guardian(&admin, &g);
     client.register_task(&admin, &7u64);
-    client.vote(&g, &7u64);
 
     let result = client.try_vote(&g, &7u64);
-    assert!(result.is_err(), "duplicate vote should be rejected");
+    assert!(result.is_err(), "vote without reputation should be rejected");
 }
 
 #[test]
@@ -289,13 +287,9 @@ fn test_reward_stream_duplicate_rejected() {
     let (env, admin, client) = setup();
     let contributor = Address::generate(&env);
 
-    let g1 = Address::generate(&env);
-    let g2 = Address::generate(&env);
-    let g3 = Address::generate(&env);
-
-    client.add_guardian(&admin, &g1);
-    client.add_guardian(&admin, &g2);
-    client.add_guardian(&admin, &g3);
+    let g1 = add_guardian_with_rep(&env, &client, &admin, 100);
+    let g2 = add_guardian_with_rep(&env, &client, &admin, 100);
+    let g3 = add_guardian_with_rep(&env, &client, &admin, 100);
     client.register_task(&admin, &50u64);
 
     client.vote(&g1, &50u64);
@@ -319,13 +313,9 @@ fn test_reward_stream_stored_after_success() {
     let (env, admin, client) = setup();
     let contributor = Address::generate(&env);
 
-    let g1 = Address::generate(&env);
-    let g2 = Address::generate(&env);
-    let g3 = Address::generate(&env);
-
-    client.add_guardian(&admin, &g1);
-    client.add_guardian(&admin, &g2);
-    client.add_guardian(&admin, &g3);
+    let g1 = add_guardian_with_rep(&env, &client, &admin, 100);
+    let g2 = add_guardian_with_rep(&env, &client, &admin, 100);
+    let g3 = add_guardian_with_rep(&env, &client, &admin, 100);
     client.register_task(&admin, &77u64);
 
     client.vote(&g1, &77u64);
@@ -349,11 +339,9 @@ fn test_lock_released_after_successful_vote() {
     // After a normal vote the lock must be cleared so subsequent votes work.
     // If the lock leaked, the second vote would fail with Locked.
     let (env, admin, client) = setup();
-    let g1 = Address::generate(&env);
-    let g2 = Address::generate(&env);
+    let g1 = add_guardian_with_rep(&env, &client, &admin, 100);
+    let g2 = add_guardian_with_rep(&env, &client, &admin, 100);
 
-    client.add_guardian(&admin, &g1);
-    client.add_guardian(&admin, &g2);
     client.register_task(&admin, &202u64);
 
     client.vote(&g1, &202u64);
@@ -380,10 +368,9 @@ fn test_lock_released_after_failed_vote() {
     // When vote() fails early (non-guardian), the lock must still be released
     // so a subsequent legitimate call can succeed.
     let (env, admin, client) = setup();
-    let g = Address::generate(&env);
+    let g = add_guardian_with_rep(&env, &client, &admin, 100);
     let stranger = Address::generate(&env);
 
-    client.add_guardian(&admin, &g);
     client.register_task(&admin, &303u64);
 
     // Non-guardian vote is rejected (lock must be released inside)
@@ -414,4 +401,49 @@ impl MockDripsContract {
     ) {
         // Mock: accept the call silently
     }
+}
+
+// ─── Multi-sig Vault integration tests ────────────────────────────────
+
+#[contract]
+pub struct MockVaultContract;
+
+#[contractimpl]
+impl MockVaultContract {
+    pub fn release_funds(_env: Env, _task_id: u64) {
+        // mock logic
+    }
+}
+
+#[test]
+fn test_task_resolution_triggers_payout() {
+    let (env, admin, client) = setup();
+    client.set_weight_threshold(&admin, &300u64);
+
+    let vault_contract_id = env.register_contract(None, MockVaultContract);
+    client.set_vault_address(&admin, &vault_contract_id);
+
+    let g = add_guardian_with_rep(&env, &client, &admin, 300);
+    client.register_task(&admin, &1u64);
+    client.vote(&g, &1u64);
+
+    let task = client.get_task(&1u64).unwrap();
+    assert!(task.is_done);
+}
+
+#[test]
+fn test_task_resolution_reverts_if_vault_unavailable() {
+    let (env, admin, client) = setup();
+    client.set_weight_threshold(&admin, &300u64);
+
+    // Generate a random address for vault, which has no contract deployed
+    let unavailable_vault = Address::generate(&env);
+    client.set_vault_address(&admin, &unavailable_vault);
+
+    let g = add_guardian_with_rep(&env, &client, &admin, 300);
+    client.register_task(&admin, &1u64);
+    
+    // The vote should fail/revert because the vault contract doesn't exist
+    let result = client.try_vote(&g, &1u64);
+    assert!(result.is_err(), "should revert if escrow contract is unavailable");
 }

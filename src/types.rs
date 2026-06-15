@@ -26,10 +26,13 @@ pub struct RewardStream {
 #[derive(Clone)]
 pub enum DataKey {
     Guardian(Address),
+    Reputation(Address),
+    WeightThreshold,
     Task(u64),
     Voted(u64, Address), // (task_id, guardian)
     Admin,
     DripsAddress,
+    VaultAddress,
     RewardStream(u64), // keyed by task_id
     Lock,              // re-entrancy mutex
 }
@@ -39,8 +42,12 @@ pub enum DataKey {
 pub enum ContractError {
     NotAuthorized = 1,
     DuplicateVote = 2,
+    NoReputationScore = 8,
+    ZeroWeightVote = 9,
+    WeightOverflow = 10,
     TaskNotVerified = 3,
     StreamAlreadyActive = 4,
     DripsCallFailed = 5,
     Locked = 6,
+    EscrowUnavailable = 7,
 }
