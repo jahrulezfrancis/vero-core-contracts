@@ -379,6 +379,82 @@ fn test_lock_released_after_failed_vote() {
     assert_eq!(client.get_task(&303u64).unwrap().votes, 1);
 }
 
+// ─── Emergency stop (pause) tests ─────────────────────────────────────
+
+#[test]
+fn test_admin_can_toggle_pause() {
+    let (_env, admin, client) = setup();
+
+    assert!(!client.is_paused(), "contract should start unpaused");
+
+    client.toggle_pause(&admin);
+    assert!(client.is_paused(), "contract should be paused after toggle");
+
+    client.toggle_pause(&admin);
+    assert!(!client.is_paused(), "contract should be unpaused after second toggle");
+}
+
+#[test]
+fn test_contract_paused_error_on_register_task() {
+    let (_env, admin, client) = setup();
+
+    client.toggle_pause(&admin);
+
+    let result = client.try_register_task(&admin, &1u64);
+    assert!(result.is_err(), "register_task should fail when paused");
+}
+
+#[test]
+fn test_contract_paused_error_on_vote() {
+    let (env, admin, client) = setup();
+    let g = add_guardian_with_rep(&env, &client, &admin, 300);
+    client.register_task(&admin, &1u64);
+
+    client.toggle_pause(&admin);
+
+    let result = client.try_vote(&g, &1u64);
+    assert!(result.is_err(), "vote should fail when paused");
+}
+
+#[test]
+fn test_contract_paused_error_on_add_guardian() {
+    let (env, admin, client) = setup();
+    let guardian = Address::generate(&env);
+
+    client.toggle_pause(&admin);
+
+    let result = client.try_add_guardian(&admin, &guardian);
+    assert!(result.is_err(), "add_guardian should fail when paused");
+}
+
+#[test]
+fn test_contract_paused_error_on_set_reputation() {
+    let (env, admin, client) = setup();
+    let guardian = Address::generate(&env);
+    client.add_guardian(&admin, &guardian);
+
+    client.toggle_pause(&admin);
+
+    let result = client.try_set_reputation(&admin, &guardian, &100u64);
+    assert!(result.is_err(), "set_reputation should fail when paused");
+}
+
+#[test]
+fn test_operations_resume_after_unpause() {
+    let (env, admin, client) = setup();
+    let g = add_guardian_with_rep(&env, &client, &admin, 300);
+
+    client.toggle_pause(&admin);
+    assert!(client.try_register_task(&admin, &1u64).is_err());
+
+    client.toggle_pause(&admin);
+    client.register_task(&admin, &1u64);
+    client.vote(&g, &1u64);
+
+    let task = client.get_task(&1u64).unwrap();
+    assert!(task.is_done, "task should resolve after unpause");
+}
+
 // ─── Mock Drips contract for test isolation ────────────────────────────
 
 use soroban_sdk::{contract, contractimpl};
